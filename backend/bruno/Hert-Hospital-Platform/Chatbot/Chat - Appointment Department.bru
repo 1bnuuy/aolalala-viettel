@@ -1,0 +1,22 @@
+meta {
+  name: Chat - Appointment Department
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{chatbot_url}}/chat
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "sessionId": "{{appointment_session_id}}",
+    "message": "Tim mạch"
+  }
+}

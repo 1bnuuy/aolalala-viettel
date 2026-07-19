@@ -1,0 +1,22 @@
+meta {
+  name: Chat - Appointment Date
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{chatbot_url}}/chat
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "sessionId": "{{appointment_session_id}}",
+    "message": "Thứ hai"
+  }
+}
