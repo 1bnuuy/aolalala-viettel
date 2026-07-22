@@ -1,0 +1,52 @@
+[
+  {
+    "id": "243670",
+    "name": "aspirin",
+    "type": "THUỐC"
+  },
+  {
+    "id": "308135",
+    "name": "amlodipine",
+    "type": "THUỐC"
+  },
+  {
+    "id": "866436",
+    "name": "metoprolol succinate",
+    "type": "THUỐC"
+  },
+  {
+    "id": "392085",
+    "name": "guaifenesin",
+    "type": "THUỐC"
+  },
+  {
+    "id": "7597",
+    "name": "nystatin",
+    "type": "THUỐC"
+  },
+  {
+    "id": "313782",
+    "name": "acetaminophen",
+    "type": "THUỐC"
+  },
+  {
+    "id": "904475",
+    "name": "pravastatin",
+    "type": "THUỐC"
+  },
+  {
+    "id": "1099279",
+    "name": "docusate sodium",
+    "type": "THUỐC"
+  },
+  {
+    "id": "312935",
+    "name": "senna",
+    "type": "THUỐC"
+  },
+  {
+    "id": "197527",
+    "name": "clonazepam",
+    "type": "THUỐC"
+  }
+]
