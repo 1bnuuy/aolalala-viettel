@@ -1,3 +1,8 @@
+# src/pipeline.py
+
+from __future__ import annotations
+
+
 class Pipeline:
 
     def __init__(
@@ -20,20 +25,32 @@ class Pipeline:
 
         entities = self.ner_model.predict(text)
 
-        predictions = []
+        predictions: list[dict] = []
 
         for entity in entities:
+
+            # -------------------------------------------------
+            # Candidate retrieval
+            # -------------------------------------------------
 
             candidates = self.candidate_retriever.search(
                 entity_text=entity.text,
                 entity_type=entity.type,
             )
 
+            # -------------------------------------------------
+            # Assertion detection
+            # -------------------------------------------------
+
             assertions = self.assertion_model.predict(
                 text=text,
                 start=entity.start,
                 end=entity.end,
             )
+
+            # -------------------------------------------------
+            # Output
+            # -------------------------------------------------
 
             predictions.append(
                 {

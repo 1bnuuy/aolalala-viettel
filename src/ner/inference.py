@@ -1,6 +1,14 @@
+# src/ner/inference.py
+
+from __future__ import annotations
+
 import re
 
 from dataclasses import dataclass
+
+from src.ner.lexicon import (
+    get_seed_lexicon,
+)
 
 
 @dataclass
@@ -13,76 +21,6 @@ class Entity:
 
 class NERModel:
 
-    # ==========================================================
-    # MEDICATIONS
-    # ==========================================================
-
-    MEDICATIONS = {
-        "aspirin",
-        "amlodipine",
-        "metoprolol",
-        "metoprolol succinate",
-        "guaifenesin",
-        "nystatin",
-        "acetaminophen",
-        "pravastatin",
-        "docusate sodium",
-        "senna",
-        "clonazepam",
-        "doxycycline",
-        "atenolol",
-        "amoxicillin",
-        "ibuprofen",
-        "paracetamol",
-        "warfarin",
-        "heparin",
-        "insulin",
-        "atorvastatin",
-        "simvastatin",
-        "losartan",
-        "lisinopril",
-        "furosemide",
-        "omeprazole",
-        "pantoprazole",
-    }
-
-    # ==========================================================
-    # SYMPTOMS
-    # ==========================================================
-
-    SYMPTOMS = {
-        "đánh trống ngực",
-        "khó thở",
-        "mệt mỏi",
-        "đau ngực",
-        "thắt chặt ngực",
-        "cảm giác thắt chặt ngực",
-        "buồn nôn",
-        "nôn",
-        "đổ mồ hôi",
-        "sốt",
-        "đau",
-        "đau nhức",
-        "lo âu",
-        "mất ngủ",
-        "táo bón",
-        "giảm dung nạp gắng sức",
-        "ho",
-    }
-
-    # ==========================================================
-    # DISEASES
-    # ==========================================================
-
-    DISEASES = {
-        "viêm tuyến mồ hôi",
-        "viêm gan cấp tính do virus B",
-    }
-
-    # ==========================================================
-    # MEDICATION INSTRUCTION
-    # ==========================================================
-
     MEDICATION_INSTRUCTION = re.compile(
         r"""
         (?:
@@ -92,221 +30,276 @@ class NERModel:
             \s*
         )
         (
-            \d+(?:\.\d+)?
+            \d+(?:[.,]\d+)?
             \s*
-            (?:mg|g|mcg|µg|ml|mL|%)
-
+            (?:mg|g|mcg|µg|ml|mL|%|iu)
+            (?:\s*-\s*\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|mL|%|iu))?
             |
-
             \b(?:po|iv|im|sc|sl|pr)\b
-
             |
-
             \b(?:qd|daily|bid|tid|qid|qhs|qam)\b
-
             |
-
             \bq\d+h\b
-
             |
-
             \bprn\b
+            |
+            \bx\b
         )
         """,
         flags=re.IGNORECASE | re.VERBOSE,
     )
 
-    def __init__(self):
+    # Generic medical phrases.
+    #
+    # These are intentionally conservative.
+    # They should not match every noun in a medical document.
+    MEDICAL_PATTERNS = [
+        (
+            re.compile(
+                r"\bthiếu\s+(?:men|máu|hồng cầu)\b" r"(?:\s+[A-Za-zÀ-ỹ0-9-]+){0,4}",
+                re.IGNORECASE,
+            ),
+            "BỆNH",
+        ),
+        (
+            re.compile(
+                r"\b(?:suy|viêm|nhiễm|rối loạn)\s+"
+                r"[A-Za-zÀ-ỹ0-9-]+"
+                r"(?:\s+[A-Za-zÀ-ỹ0-9-]+){0,4}",
+                re.IGNORECASE,
+            ),
+            "BỆNH",
+        ),
+    ]
 
-        self.lexicon = self._build_lexicon()
+    def __init__(
+        self,
+        ontology: list[dict] | None = None,
+    ):
+        self.ontology = ontology or []
 
-    # ==========================================================
-    # BUILD LEXICON
-    # ==========================================================
+        self.ontology_terms = self._build_ontology_terms()
 
-    def _build_lexicon(self):
+        self.lexicon = get_seed_lexicon()
 
-        terms = []
+    # ---------------------------------------------------------
+    # ONTOLOGY
+    # ---------------------------------------------------------
 
-        for term in self.MEDICATIONS:
+    def _build_ontology_terms(
+        self,
+    ) -> list[tuple[str, str]]:
+
+        terms: list[tuple[str, str]] = []
+
+        for concept in self.ontology:
+
+            name = concept.get("name")
+            entity_type = concept.get("type")
+
+            if not name or not entity_type:
+                continue
 
             terms.append(
                 (
-                    term,
-                    "THUỐC",
+                    str(name),
+                    str(entity_type),
                 )
             )
-
-        for term in self.SYMPTOMS:
-
-            terms.append(
-                (
-                    term,
-                    "TRIỆU_CHỨNG",
-                )
-            )
-
-        for term in self.DISEASES:
-
-            terms.append(
-                (
-                    term,
-                    "BỆNH",
-                )
-            )
-
-        # Longest first.
-        #
-        # Example:
-        #
-        # "cảm giác thắt chặt ngực"
-        #
-        # should be matched before:
-        #
-        # "thắt chặt ngực"
 
         terms.sort(
-            key=lambda x: len(x[0]),
+            key=lambda item: len(item[0]),
             reverse=True,
         )
 
         return terms
 
-    # ==========================================================
+    # ---------------------------------------------------------
     # PREDICT
-    # ==========================================================
+    # ---------------------------------------------------------
 
     def predict(
         self,
         text: str,
-    ):
+    ) -> list[Entity]:
 
-        entities = []
+        entities: list[Entity] = []
 
-        # ------------------------------------------------------
-        # Detect every lexicon term
-        # ------------------------------------------------------
+        # -----------------------------------------------------
+        # 1. Ontology terms
+        # -----------------------------------------------------
+
+        for term, entity_type in self.ontology_terms:
+
+            entities.extend(
+                self._find_term(
+                    text=text,
+                    term=term,
+                    entity_type=entity_type,
+                )
+            )
+
+        # -----------------------------------------------------
+        # 2. Seed lexicon
+        # -----------------------------------------------------
 
         for term, entity_type in self.lexicon:
 
-            pattern = re.compile(
-                rf"(?<!\w){re.escape(term)}(?!\w)",
-                flags=re.IGNORECASE,
+            entities.extend(
+                self._find_term(
+                    text=text,
+                    term=term,
+                    entity_type=entity_type,
+                )
             )
+
+        # -----------------------------------------------------
+        # 3. Conservative medical patterns
+        # -----------------------------------------------------
+
+        for pattern, entity_type in self.MEDICAL_PATTERNS:
 
             for match in pattern.finditer(text):
 
-                entities.append(
-                    Entity(
-                        text=match.group(0),
-                        type=entity_type,
-                        start=match.start(),
-                        end=match.end(),
-                    )
+                entity = Entity(
+                    text=match.group(0).strip(),
+                    type=entity_type,
+                    start=match.start(),
+                    end=match.end(),
                 )
 
-        # ------------------------------------------------------
-        # Remove overlapping entities
-        # ------------------------------------------------------
+                entities.append(entity)
+
+        # -----------------------------------------------------
+        # 4. Remove overlaps
+        # -----------------------------------------------------
 
         entities = self._deduplicate(entities)
 
-        # ------------------------------------------------------
-        # Expand medication mentions
-        # ------------------------------------------------------
+        # -----------------------------------------------------
+        # 5. Expand medications
+        # -----------------------------------------------------
 
-        expanded = []
+        expanded: list[Entity] = []
 
         for entity in entities:
 
             if entity.type == "THUỐC":
 
                 entity = self._expand_medication(
-                    text,
-                    entity,
+                    text=text,
+                    entity=entity,
                 )
 
             expanded.append(entity)
 
-        # ------------------------------------------------------
-        # Final deduplication
-        # ------------------------------------------------------
+        # -----------------------------------------------------
+        # 6. Final deduplication
+        # -----------------------------------------------------
 
         expanded = self._deduplicate(expanded)
 
         expanded.sort(
-            key=lambda x: (
-                x.start,
-                x.end,
+            key=lambda entity: (
+                entity.start,
+                entity.end,
             )
         )
 
         return expanded
 
-    # ==========================================================
-    # DEDUPLICATION
-    # ==========================================================
+    # ---------------------------------------------------------
+    # TERM MATCHING
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _find_term(
+        text: str,
+        term: str,
+        entity_type: str,
+    ) -> list[Entity]:
+
+        pattern = re.compile(
+            rf"(?<!\w)" rf"{re.escape(term)}" rf"(?!\w)",
+            flags=re.IGNORECASE,
+        )
+
+        results: list[Entity] = []
+
+        for match in pattern.finditer(text):
+
+            results.append(
+                Entity(
+                    text=match.group(0),
+                    type=entity_type,
+                    start=match.start(),
+                    end=match.end(),
+                )
+            )
+
+        return results
+
+    # ---------------------------------------------------------
+    # OVERLAP RESOLUTION
+    # ---------------------------------------------------------
 
     @staticmethod
     def _deduplicate(
-        entities,
-    ):
+        entities: list[Entity],
+    ) -> list[Entity]:
 
-        # Longer entities first.
-
+        # Longest entities first.
         ordered = sorted(
             entities,
-            key=lambda x: (
-                -(x.end - x.start),
-                x.start,
+            key=lambda entity: (
+                -(entity.end - entity.start),
+                entity.start,
             ),
         )
 
-        selected = []
+        selected: list[Entity] = []
 
         for entity in ordered:
 
-            overlap = False
+            overlaps = False
 
             for existing in selected:
 
                 if entity.start < existing.end and entity.end > existing.start:
-
-                    overlap = True
+                    overlaps = True
                     break
 
-            if not overlap:
+            if not overlaps:
 
                 selected.append(entity)
 
-        selected.sort(key=lambda x: x.start)
+        selected.sort(
+            key=lambda entity: (
+                entity.start,
+                entity.end,
+            )
+        )
 
         return selected
 
-    # ==========================================================
+    # ---------------------------------------------------------
     # MEDICATION EXPANSION
-    # ==========================================================
+    # ---------------------------------------------------------
 
     def _expand_medication(
         self,
-        text,
-        entity,
-    ):
+        text: str,
+        entity: Entity,
+    ) -> Entity:
 
-        # Only expand within the same line.
-
-        newline = text.find(
+        line_end = text.find(
             "\n",
             entity.end,
         )
 
-        if newline == -1:
+        if line_end == -1:
 
             line_end = len(text)
-
-        else:
-
-            line_end = newline
 
         current_end = entity.end
 
@@ -317,7 +310,6 @@ class NERModel:
             match = self.MEDICATION_INSTRUCTION.match(remaining)
 
             if not match:
-
                 break
 
             current_end += match.end()
