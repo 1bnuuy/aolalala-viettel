@@ -1,156 +1,190 @@
-# scripts/predict.py
-
 from __future__ import annotations
 
-import json
-
+import argparse
 from pathlib import Path
 
-from src.data.loader import (
-    load_input_directory,
-)
+from src.data.loader import load_input_directory
+from src.ner.inference import NERModel
+from src.candidates.retrieve import CandidateRetriever
+from src.assertions.inference import AssertionModel
+from src.pipeline import Pipeline
+from src.output import save_prediction
 
-from src.ner.inference import (
-    NERModel,
-)
+# ============================================================
+# DEFAULT PATHS
+# ============================================================
 
-from src.candidates.retrieve import (
-    CandidateRetriever,
-)
+DEFAULT_INPUT_DIR = Path("data/input")
 
-from src.assertions.inference import (
-    AssertionModel,
-)
+DEFAULT_OUTPUT_DIR = Path("output")
 
-from src.pipeline import (
-    Pipeline,
-)
+DEFAULT_NER_MODEL = Path("model/ner")
 
-from src.output import (
-    save_prediction,
-)
-
-INPUT_DIR = Path("data/input")
-
-ONTOLOGY_PATH = Path("data/ontology.json")
-
-INDEX_PATH = Path("model/candidates/bm25.pkl")
-
-OUTPUT_DIR = Path("output")
+DEFAULT_INDEX = Path("model/candidates/bm25.pkl")
 
 
-def load_ontology() -> list[dict]:
+# ============================================================
+# ARGUMENTS
+# ============================================================
 
-    if not ONTOLOGY_PATH.exists():
 
-        raise FileNotFoundError(f"Ontology not found: " f"{ONTOLOGY_PATH}")
+def parse_args():
 
-    with open(
-        ONTOLOGY_PATH,
-        "r",
-        encoding="utf-8",
-    ) as file:
+    parser = argparse.ArgumentParser(
+        description=("Run medical concept extraction " "on TXT files.")
+    )
 
-        ontology = json.load(file)
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DEFAULT_INPUT_DIR,
+        help=("Directory containing input .txt files. " "Default: data/input"),
+    )
 
-    if not isinstance(
-        ontology,
-        list,
-    ):
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=("Directory for generated JSON files. " "Default: output"),
+    )
 
-        raise ValueError("ontology.json must contain " "a JSON array.")
+    parser.add_argument(
+        "--ner-model",
+        type=Path,
+        default=DEFAULT_NER_MODEL,
+        help=("Path to trained NER model. " "Default: model/ner"),
+    )
 
-    return ontology
+    parser.add_argument(
+        "--index",
+        type=Path,
+        default=DEFAULT_INDEX,
+        help=("Path to BM25 candidate index. " "Default: model/candidates/bm25.pkl"),
+    )
+
+    return parser.parse_args()
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 
 def main():
 
-    # ---------------------------------------------------------
-    # Load ontology
-    # ---------------------------------------------------------
+    args = parse_args()
 
-    print("Loading ontology...")
+    input_dir = args.input
 
-    ontology = load_ontology()
+    output_dir = args.output
 
-    print(f"Loaded {len(ontology)} concepts.")
+    ner_model_path = args.ner_model
 
-    # ---------------------------------------------------------
-    # Initialize NER
-    # ---------------------------------------------------------
+    index_path = args.index
 
-    print("Initializing NER...")
+    # ========================================================
+    # CHECK INPUT DIRECTORY
+    # ========================================================
 
-    ner_model = NERModel(
-        ontology=ontology,
-    )
+    if not input_dir.exists():
 
-    # ---------------------------------------------------------
-    # Candidate index
-    # ---------------------------------------------------------
+        raise FileNotFoundError(f"Input directory not found:\n" f"{input_dir}")
 
-    print("Loading candidate index...")
+    # ========================================================
+    # CHECK NER MODEL
+    # ========================================================
 
-    if not INDEX_PATH.exists():
+    if not ner_model_path.exists():
 
         raise FileNotFoundError(
-            f"Candidate index not found: "
-            f"{INDEX_PATH}\n\n"
-            "Run:\n"
+            f"NER model not found:\n"
+            f"{ner_model_path}\n\n"
+            "Train the NER model first:\n"
+            "python -m scripts.train_ner"
+        )
+
+    # ========================================================
+    # CHECK CANDIDATE INDEX
+    # ========================================================
+
+    if not index_path.exists():
+
+        raise FileNotFoundError(
+            f"Candidate index not found:\n"
+            f"{index_path}\n\n"
+            "Build the candidate index first:\n"
             "python -m scripts.build_index"
         )
 
+    # ========================================================
+    # INITIALIZE NER
+    # ========================================================
+
+    print("Loading NER model...")
+
+    ner_model = NERModel(model_path=str(ner_model_path))
+
+    # ========================================================
+    # INITIALIZE CANDIDATE RETRIEVER
+    # ========================================================
+
+    print("Loading candidate index...")
+
     candidate_retriever = CandidateRetriever(
-        index_path=INDEX_PATH,
+        index_path=index_path,
         top_k=10,
     )
 
-    # ---------------------------------------------------------
-    # Assertions
-    # ---------------------------------------------------------
+    # ========================================================
+    # INITIALIZE ASSERTION MODEL
+    # ========================================================
 
     print("Initializing assertion engine...")
 
     assertion_model = AssertionModel()
 
-    # ---------------------------------------------------------
-    # Pipeline
-    # ---------------------------------------------------------
+    # ========================================================
+    # CREATE PIPELINE
+    # ========================================================
 
     pipeline = Pipeline(
         ner_model=ner_model,
-        candidate_retriever=(candidate_retriever),
-        assertion_model=(assertion_model),
+        candidate_retriever=candidate_retriever,
+        assertion_model=assertion_model,
     )
 
-    # ---------------------------------------------------------
-    # Load TXT files
-    # ---------------------------------------------------------
+    # ========================================================
+    # LOAD INPUT TXT FILES
+    # ========================================================
 
-    documents = load_input_directory(INPUT_DIR)
+    print(f"\nLoading input files from:\n" f"{input_dir.resolve()}")
+
+    documents = load_input_directory(input_dir)
 
     if not documents:
 
-        raise RuntimeError(f"No .txt files found in " f"{INPUT_DIR}")
+        raise RuntimeError(f"No .txt files found in:\n" f"{input_dir}")
 
     print(f"Found {len(documents)} " f"input files.")
 
-    # ---------------------------------------------------------
-    # Clear output
-    # ---------------------------------------------------------
+    # ========================================================
+    # PREPARE OUTPUT
+    # ========================================================
 
-    OUTPUT_DIR.mkdir(
+    output_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    for old_file in OUTPUT_DIR.glob("*.json"):
+    # Remove old predictions.
+
+    for old_file in output_dir.glob("*.json"):
 
         old_file.unlink()
 
-    # ---------------------------------------------------------
-    # Run inference
-    # ---------------------------------------------------------
+    # ========================================================
+    # RUN INFERENCE
+    # ========================================================
 
     print("\nStarting inference...\n")
 
@@ -164,21 +198,37 @@ def main():
 
         print(f"[{index}/{len(documents)}] " f"Processing {filename}")
 
+        # Run NER
+        # Candidate mapping
+        # Assertion detection
+
         result = pipeline.predict(text)
 
+        # Save:
+        #
+        # output/1.json
+        # output/2.json
+        # ...
+        #
         output_path = save_prediction(
             result=result,
             index=index,
-            output_dir=OUTPUT_DIR,
+            output_dir=output_dir,
         )
 
         print(f"  Found " f"{len(result)} entities")
 
         print(f"  Saved: " f"{output_path}")
 
+    # ========================================================
+    # DONE
+    # ========================================================
+
     print("\nInference completed.")
 
-    print(f"Predictions saved to: " f"{OUTPUT_DIR.resolve()}")
+    print("Predictions saved to:")
+
+    print(output_dir.resolve())
 
 
 if __name__ == "__main__":

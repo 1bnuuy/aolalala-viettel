@@ -1,322 +1,162 @@
-# src/ner/inference.py
-
-from __future__ import annotations
-
-import re
-
 from dataclasses import dataclass
+from pathlib import Path
 
-from src.ner.lexicon import (
-    get_seed_lexicon,
+import torch
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForTokenClassification,
 )
 
 
 @dataclass
 class Entity:
+
     text: str
+
     type: str
+
     start: int
+
     end: int
 
 
 class NERModel:
 
-    MEDICATION_INSTRUCTION = re.compile(
-        r"""
-        (?:
-            \s+
-            |
-            [,:;]
-            \s*
-        )
-        (
-            \d+(?:[.,]\d+)?
-            \s*
-            (?:mg|g|mcg|µg|ml|mL|%|iu)
-            (?:\s*-\s*\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|µg|ml|mL|%|iu))?
-            |
-            \b(?:po|iv|im|sc|sl|pr)\b
-            |
-            \b(?:qd|daily|bid|tid|qid|qhs|qam)\b
-            |
-            \bq\d+h\b
-            |
-            \bprn\b
-            |
-            \bx\b
-        )
-        """,
-        flags=re.IGNORECASE | re.VERBOSE,
-    )
-
-    # Generic medical phrases.
-    #
-    # These are intentionally conservative.
-    # They should not match every noun in a medical document.
-    MEDICAL_PATTERNS = [
-        (
-            re.compile(
-                r"\bthiếu\s+(?:men|máu|hồng cầu)\b" r"(?:\s+[A-Za-zÀ-ỹ0-9-]+){0,4}",
-                re.IGNORECASE,
-            ),
-            "BỆNH",
-        ),
-        (
-            re.compile(
-                r"\b(?:suy|viêm|nhiễm|rối loạn)\s+"
-                r"[A-Za-zÀ-ỹ0-9-]+"
-                r"(?:\s+[A-Za-zÀ-ỹ0-9-]+){0,4}",
-                re.IGNORECASE,
-            ),
-            "BỆNH",
-        ),
-    ]
-
     def __init__(
         self,
-        ontology: list[dict] | None = None,
+        model_path: str = "model/ner",
     ):
-        self.ontology = ontology or []
 
-        self.ontology_terms = self._build_ontology_terms()
+        self.model_path = Path(model_path)
 
-        self.lexicon = get_seed_lexicon()
+        if not self.model_path.exists():
 
-    # ---------------------------------------------------------
-    # ONTOLOGY
-    # ---------------------------------------------------------
+            raise FileNotFoundError(f"NER model not found: " f"{self.model_path}")
 
-    def _build_ontology_terms(
-        self,
-    ) -> list[tuple[str, str]]:
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
 
-        terms: list[tuple[str, str]] = []
+        self.model = AutoModelForTokenClassification.from_pretrained(self.model_path)
 
-        for concept in self.ontology:
-
-            name = concept.get("name")
-            entity_type = concept.get("type")
-
-            if not name or not entity_type:
-                continue
-
-            terms.append(
-                (
-                    str(name),
-                    str(entity_type),
-                )
-            )
-
-        terms.sort(
-            key=lambda item: len(item[0]),
-            reverse=True,
-        )
-
-        return terms
-
-    # ---------------------------------------------------------
-    # PREDICT
-    # ---------------------------------------------------------
+        self.model.eval()
 
     def predict(
         self,
         text: str,
     ) -> list[Entity]:
 
-        entities: list[Entity] = []
-
-        # -----------------------------------------------------
-        # 1. Ontology terms
-        # -----------------------------------------------------
-
-        for term, entity_type in self.ontology_terms:
-
-            entities.extend(
-                self._find_term(
-                    text=text,
-                    term=term,
-                    entity_type=entity_type,
-                )
-            )
-
-        # -----------------------------------------------------
-        # 2. Seed lexicon
-        # -----------------------------------------------------
-
-        for term, entity_type in self.lexicon:
-
-            entities.extend(
-                self._find_term(
-                    text=text,
-                    term=term,
-                    entity_type=entity_type,
-                )
-            )
-
-        # -----------------------------------------------------
-        # 3. Conservative medical patterns
-        # -----------------------------------------------------
-
-        for pattern, entity_type in self.MEDICAL_PATTERNS:
-
-            for match in pattern.finditer(text):
-
-                entity = Entity(
-                    text=match.group(0).strip(),
-                    type=entity_type,
-                    start=match.start(),
-                    end=match.end(),
-                )
-
-                entities.append(entity)
-
-        # -----------------------------------------------------
-        # 4. Remove overlaps
-        # -----------------------------------------------------
-
-        entities = self._deduplicate(entities)
-
-        # -----------------------------------------------------
-        # 5. Expand medications
-        # -----------------------------------------------------
-
-        expanded: list[Entity] = []
-
-        for entity in entities:
-
-            if entity.type == "THUỐC":
-
-                entity = self._expand_medication(
-                    text=text,
-                    entity=entity,
-                )
-
-            expanded.append(entity)
-
-        # -----------------------------------------------------
-        # 6. Final deduplication
-        # -----------------------------------------------------
-
-        expanded = self._deduplicate(expanded)
-
-        expanded.sort(
-            key=lambda entity: (
-                entity.start,
-                entity.end,
-            )
+        encoded = self.tokenizer(
+            text,
+            return_tensors="pt",
+            return_offsets_mapping=True,
+            truncation=True,
         )
 
-        return expanded
+        offsets = encoded.pop("offset_mapping")[0]
 
-    # ---------------------------------------------------------
-    # TERM MATCHING
-    # ---------------------------------------------------------
+        with torch.no_grad():
 
-    @staticmethod
-    def _find_term(
-        text: str,
-        term: str,
-        entity_type: str,
-    ) -> list[Entity]:
+            outputs = self.model(**encoded)
 
-        pattern = re.compile(
-            rf"(?<!\w)" rf"{re.escape(term)}" rf"(?!\w)",
-            flags=re.IGNORECASE,
-        )
+        predictions = outputs.logits.argmax(dim=-1)[0]
 
-        results: list[Entity] = []
+        entities = []
 
-        for match in pattern.finditer(text):
+        current_type = None
 
-            results.append(
+        current_start = None
+
+        current_end = None
+
+        for index, label_id in enumerate(predictions.tolist()):
+
+            label = self.model.config.id2label[label_id]
+
+            token_start = offsets[index][0].item()
+
+            token_end = offsets[index][1].item()
+
+            if token_start == token_end:
+
+                continue
+
+            if label == "O":
+
+                if current_type is not None:
+
+                    entities.append(
+                        Entity(
+                            text=text[current_start:current_end],
+                            type=current_type,
+                            start=current_start,
+                            end=current_end,
+                        )
+                    )
+
+                    current_type = None
+
+                    current_start = None
+
+                    current_end = None
+
+                continue
+
+            prefix, entity_type = label.split(
+                "-",
+                1,
+            )
+
+            if prefix == "B":
+
+                if current_type is not None:
+
+                    entities.append(
+                        Entity(
+                            text=text[current_start:current_end],
+                            type=current_type,
+                            start=current_start,
+                            end=current_end,
+                        )
+                    )
+
+                current_type = entity_type
+
+                current_start = token_start
+
+                current_end = token_end
+
+            elif prefix == "I" and current_type == entity_type:
+
+                current_end = token_end
+
+            else:
+
+                if current_type is not None:
+
+                    entities.append(
+                        Entity(
+                            text=text[current_start:current_end],
+                            type=current_type,
+                            start=current_start,
+                            end=current_end,
+                        )
+                    )
+
+                current_type = entity_type
+
+                current_start = token_start
+
+                current_end = token_end
+
+        if current_type is not None:
+
+            entities.append(
                 Entity(
-                    text=match.group(0),
-                    type=entity_type,
-                    start=match.start(),
-                    end=match.end(),
+                    text=text[current_start:current_end],
+                    type=current_type,
+                    start=current_start,
+                    end=current_end,
                 )
             )
 
-        return results
-
-    # ---------------------------------------------------------
-    # OVERLAP RESOLUTION
-    # ---------------------------------------------------------
-
-    @staticmethod
-    def _deduplicate(
-        entities: list[Entity],
-    ) -> list[Entity]:
-
-        # Longest entities first.
-        ordered = sorted(
-            entities,
-            key=lambda entity: (
-                -(entity.end - entity.start),
-                entity.start,
-            ),
-        )
-
-        selected: list[Entity] = []
-
-        for entity in ordered:
-
-            overlaps = False
-
-            for existing in selected:
-
-                if entity.start < existing.end and entity.end > existing.start:
-                    overlaps = True
-                    break
-
-            if not overlaps:
-
-                selected.append(entity)
-
-        selected.sort(
-            key=lambda entity: (
-                entity.start,
-                entity.end,
-            )
-        )
-
-        return selected
-
-    # ---------------------------------------------------------
-    # MEDICATION EXPANSION
-    # ---------------------------------------------------------
-
-    def _expand_medication(
-        self,
-        text: str,
-        entity: Entity,
-    ) -> Entity:
-
-        line_end = text.find(
-            "\n",
-            entity.end,
-        )
-
-        if line_end == -1:
-
-            line_end = len(text)
-
-        current_end = entity.end
-
-        while current_end < line_end:
-
-            remaining = text[current_end:line_end]
-
-            match = self.MEDICATION_INSTRUCTION.match(remaining)
-
-            if not match:
-                break
-
-            current_end += match.end()
-
-        return Entity(
-            text=text[entity.start : current_end].strip(),
-            type=entity.type,
-            start=entity.start,
-            end=current_end,
-        )
+        return entities
