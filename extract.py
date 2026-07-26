@@ -33,6 +33,7 @@ import re
 import os
 import json
 import glob
+import unicodedata
 
 # --------------------------------------------------------------------------
 # 1. TU DIEN / DANH SACH TRIGGER
@@ -89,6 +90,7 @@ SYMPTOM_TERMS = [
 ]
 
 DIAGNOSIS_TRIGGER_RE = re.compile(
+    r"(?<!dễ bị )(?<!dễ nhầm )(?<!hay nhầm )"
     r"[Cc]hẩn\s*đoán(?!\s*hình\s*ảnh)(?!\s*phân\s*biệt)\s*(?:[:：]\s*)*"
     r"(?:là\s+)?(?:mắc\s+)?([^\n.]{3,300})"
 )
@@ -170,7 +172,7 @@ DISEASE_ICD10 = {
     "nhiễm khuẩn huyết": ["A41.9"],
     "não úng thủy": ["G91.9"],
     "giãn thừng tinh": ["I86.1"],
-    "quá liều kháng vitamin k": ["T45.5X1A"],
+    "quá liều kháng vitamin k": ["T45.7"],
     "viêm túi mật cấp": ["K81.0"],
     "ung thư biểu mô tuyến": ["C80.1"],
     "ung thư biểu mô tế bào vảy": ["C80.1"],
@@ -270,12 +272,12 @@ DISEASE_ICD10 = {
     "viêm tụy cấp": ["K85.9"],
     "viêm tụy mạn": ["K86.1"],
     "suy hô hấp": ["J96.9"],
-    "ngưng thở khi ngủ": ["G47.33"],
-    "rung nhĩ": ["I48.91"],
-    "block nhĩ thất": ["I44.30"],
+    "ngưng thở khi ngủ": ["G47.3"],
+    "rung nhĩ": ["I48.9"],
+    "block nhĩ thất": ["I44.3"],
     "nhồi máu não": ["I63.9"],
     "phình động mạch chủ": ["I71.9"],
-    "huyết khối tĩnh mạch sâu": ["I82.409"],
+    "huyết khối tĩnh mạch sâu": ["I80.2"],
     "viêm tắc tĩnh mạch": ["I80.9"],
     # bo sung vong 5: alias/viet tat va cac chan doan phat hien qua quet
     # toan bo corpus (xem ghi chu o dau file ve do chinh xac uoc luong)
@@ -288,13 +290,13 @@ DISEASE_ICD10 = {
     "stent mạch vành": ["Z95.5"],
     "cắt cụt chân": ["Z89.9"],
     "cắt cụt chi": ["Z89.9"],
-    "nhiễm trùng chi dưới": ["L03.119"],
+    "nhiễm trùng chi dưới": ["L03.1"],
     "thiểu sản vành tai": ["Q17.2"],
     "tịt ống tai ngoài": ["Q16.1"],
     # bo sung vong 6 (quet loi trich xuat khong co candidates + tu dien
     # ICD-10 mo rong doi chieu them cac chan doan/phat hien xuat hien
     # trong corpus nhung truoc do chua co ma anh xa)
-    "xẹp phổi": ["J98.11"],
+    "xẹp phổi": ["J98.1"],
     "viêm xương tủy": ["M86.9"],
     "viêm xương tuỷ": ["M86.9"],
     "ung thư di căn": ["C79.9"],
@@ -305,6 +307,26 @@ DISEASE_ICD10 = {
     "tắc hẹp động mạch thận": ["I70.1"],
     "bệnh lý chất trắng": ["G93.9"],
     "viêm túi mật": ["K81.9"],
+    # bo sung vong 7 (quet cac file dang Q&A suc khoe cong dong bi bo sot
+    # hoan toan trong cac vong truoc, xac dinh qua ra soat cac file co so
+    # luong thuc the trich xuat qua thap)
+    "phù gai thị": ["H47.1"],
+    "thoái hóa tinh bột": ["E85.9"],
+    "rối loạn chuyển hóa tinh bột": ["E85.9"],
+    "amyloidosis": ["E85.9"],
+    "mày đay vô căn": ["L50.1"],
+    "mày đay mạn": ["L50.8"],
+    "mày đay": ["L50.9"],
+    "mề đay": ["L50.9"],
+    "hội chứng tăng đông": ["D68.9"],
+    "thrombophilia": ["D68.9"],
+    "thiểu sản vành tai": ["Q17.2"],
+    "tịt ống tai ngoài": ["Q16.1"],
+    "nấm bẹn": ["B35.6"],
+    "tiền sản giật": ["O14.9"],
+    "mụn trứng cá": ["L70.0"],
+    "u xơ tuyến vú": ["D24"],
+    "u nang tuyến vú": ["N60.1"],
 }
 
 DRUG_NAMES = [
@@ -517,6 +539,13 @@ SECTION_TYPE_HEADERS = {
     "CHẨN_ĐOÁN": [
         "chẩn đoán phân biệt", "các phát hiện chẩn đoán khác",
         "chẩn đoán xác định", "các kết quả chẩn đoán khác",
+        # bo sung vong 8: quet toan bo corpus phat hien cac tieu de nay
+        # dan dau nhung danh sach benh dang bullet nhung TRUOC DAY KHONG
+        # duoc anh xa toi loai nao (vd "Bệnh phổi kẽ do sử dụng corticoid
+        # liều cao kéo dài", "Hội chứng kháng enzym tổng hợp protein" --
+        # cac ten benh khong co trong tu dien ICD10 nen chi co the duoc
+        # bat qua co che section-header nay).
+        "tiền sử bệnh nội khoa", "bệnh lý mãn tính", "tiền sử bản thân",
     ],
 }
 ANY_HEADER_RE = re.compile(
@@ -576,12 +605,34 @@ def find_lab_panel(text):
     return cands
 
 
+# Cac tu trieu chung ngan, de bi trung voi mot tu/cum tu khac co nghia hoan
+# toan khac (khong phai trieu chung) khi dung tu dien don gian. Voi moi tu
+# nay, dinh nghia them dieu kien ngu canh am/duong de loai bo false
+# positive da phat hien qua ra soat corpus vong 7.
+SYMPTOM_CONTEXT_FILTERS = {
+    # "yếu" (weak) khong duoc tinh neu la mot phan cua "yếu tố" (factor) hoac
+    # "chủ yếu" (mainly/chiefly) -- ca hai deu rat pho bien trong van ban
+    # nhung khong lien quan gi den trieu chung yeu suc.
+    "yếu": lambda before, after: not after.startswith("tố") and not before.rstrip().endswith("chủ"),
+    # "phù" (edema/swelling) khong duoc tinh neu la "phù hợp" (suitable).
+    # "phù gai thị" (papilledema) la mot khai niem lam sang khac, duoc xu ly
+    # rieng trong tu dien CHẨN_ĐOÁN nen cung loai khoi day de tranh trung 2 lan.
+    "phù": lambda before, after: not after.startswith("hợp") and not after.startswith("gai thị"),
+}
+
+
 def find_symptoms(text):
     cands = []
     low = text.lower()
     for term in sorted(SYMPTOM_TERMS, key=len, reverse=True):
+        filt = SYMPTOM_CONTEXT_FILTERS.get(term)
         for m in re.finditer(r"\b" + re.escape(term) + r"\b", low):
             s, e = m.span()
+            if filt is not None:
+                before = low[max(0, s - 15):s]
+                after = low[e:e + 15].lstrip()
+                if not filt(before, after):
+                    continue
             cands.append((s, e, text[s:e], "TRIỆU_CHỨNG"))
     return cands
 
@@ -604,25 +655,59 @@ def find_diagnoses(text):
                 split_here = True
             else:
                 after = segment[mm.end():mm.end() + 1]
-                split_here = after.isupper()
+                after_word = segment[mm.end():mm.end() + 11]
+                split_here = after.isupper() or after_word.lower().startswith(
+                    ("phát hiện ",)
+                )
             if split_here:
                 pieces.append((last, mm.start()))
                 last = mm.end()
         pieces.append((last, len(segment)))
+        LEAD_STRIP_RE = re.compile(
+            r"^(?:phát hiện(?:\s+thêm)?|ghi nhận|cho thấy)\s+", re.IGNORECASE
+        )
+        TRAIL_STRIP_RE = re.compile(
+            r"\s+(?:khi (?:làm )?nội soi|qua nội soi)$", re.IGNORECASE
+        )
         for a, b in pieces:
             raw = segment[a:b]
             chunk = raw.strip(" .:：")
+            if chunk.endswith(")") and "(" not in chunk:
+                chunk = chunk[:-1].strip()
+            lm = LEAD_STRIP_RE.match(chunk)
+            if lm:
+                chunk = chunk[lm.end():]
+            tm = TRAIL_STRIP_RE.search(chunk)
+            if tm:
+                chunk = chunk[:tm.start()]
             if len(chunk) >= 3:
                 off = raw.find(chunk[0]) if chunk else 0
                 cs = seg_start + a + off
                 ce = cs + len(chunk)
                 pieces_out.append((cs, ce, chunk))
 
+    # Cac cum tu noi tiep theo sau ten benh thuong la mo ta/giai thich them
+    # chu khong phai liet ke chan doan khac (vd "não úng thủy, có biểu hiện
+    # tăng đau đầu..."). Cat doan tai day de tranh bat ca cau dai lam CHẨN
+    # ĐOÁN.
+    CONT_CUT_RE = re.compile(
+        r",?\s*(?:có biểu hiện|biểu hiện|triệu chứng cải thiện|"
+        r"nghi (?:ngờ\s+)?liên quan|nghi ngờ liên quan|và có thể dẫn đến|"
+        r"có thể dẫn đến|dẫn đến|nguyên nhân(?:\s+do)?|"
+        r"điều trị bằng)",
+        re.IGNORECASE,
+    )
+
     pieces_out = []
     for pat in (DIAGNOSIS_TRIGGER_RE, DIAGNOSIS_TRIGGER2_RE):
         for m in pat.finditer(text):
             seg_s, seg_e = m.span(1)
-            split_diag_list(seg_s, text[seg_s:seg_e])
+            seg_text = text[seg_s:seg_e]
+            cm = CONT_CUT_RE.search(seg_text)
+            if cm and cm.start() >= 3:
+                seg_e = seg_s + cm.start()
+                seg_text = text[seg_s:seg_e]
+            split_diag_list(seg_s, seg_text)
     for cs, ce, chunk in pieces_out:
         if _looks_like_diagnosis(chunk):
             cands.append((cs, ce, chunk, "CHẨN_ĐOÁN"))
@@ -632,7 +717,28 @@ def find_diagnoses(text):
         for m in re.finditer(r"\b" + re.escape(name) + r"\b", low):
             s, e = m.span()
             cands.append((s, e, text[s:e], "CHẨN_ĐOÁN"))
+
+    # Mot so cum chan doan trong corpus bi chen them so lieu/tinh trang o
+    # giua (vd "tắc hẹp 80% động mạch thận trái") nen khong khop duoc voi
+    # cum "cứng" trong tu dien qua exact-substring. Bo sung regex linh hoat
+    # cho phep xen mot cum dinh luong (vd "80%", "mức độ nặng") giua cac
+    # tu goc cua ten benh, ap dung cho mot vai mau hinh pho bien da phat
+    # hien qua ra soat cac file co so luong thuc the trich xuat qua thap.
+    FLEX_DISEASE_PATTERNS = [
+        (re.compile(r"tắc\s+hẹp(?:\s+[\d.,]+\s*%)?\s+động\s+mạch\s+thận(?:\s+(?:trái|phải))?"),
+         ["I70.1"]),
+        (re.compile(r"hẹp(?:\s+[\d.,]+\s*%)?\s+động\s+mạch\s+vành(?:\s+(?:trái|phải))?"),
+         ["I25.1"]),
+    ]
+    for pat, codes in FLEX_DISEASE_PATTERNS:
+        for m in pat.finditer(low):
+            s, e = m.span()
+            cands.append((s, e, text[s:e], "CHẨN_ĐOÁN"))
+            _FLEX_CODES[text[s:e].lower()] = codes
     return cands
+
+
+_FLEX_CODES = {}
 
 
 def find_drugs(text):
@@ -653,6 +759,51 @@ def find_drugs(text):
     return cands
 
 
+TRUSTED_DIAGNOSIS_LIST_HEADERS = {
+    "tiền sử bệnh nội khoa", "bệnh lý mãn tính", "tiền sử bản thân",
+}
+
+
+NO_COLON_TRUSTED_HEADER_RE = re.compile(
+    r"(?:^|\n)[ \t]*(?:[Cc]ác\s+)?"
+    r"(bệnh lý mãn tính|tiền sử bệnh nội khoa|tiền sử bản thân)"
+    r"[ \t]*\n", re.IGNORECASE
+)
+
+
+def find_trusted_diagnosis_lists(text):
+    """Bat cac tieu de danh sach benh man tinh KHONG co dau hai cham (vd
+    'Các bệnh lý mãn tính' tren mot dong rieng, theo sau la danh sach
+    bullet) -- ANY_HEADER_RE yeu cau dau ':' nen bo sot dang nay."""
+    cands = []
+    for hm in NO_COLON_TRUSTED_HEADER_RE.finditer(text):
+        block_start = hm.end()
+        block_end = min(len(text), block_start + 500)
+        block = text[block_start:block_end]
+        blank_idx = block.find("\n\n")
+        if blank_idx != -1:
+            block = block[:blank_idx]
+        num_hdr = NUMBERED_HEADER_RE.search(block)
+        if num_hdr:
+            block = block[:num_hdr.start()]
+        sub_hdr = SUBHEADER_BULLET_RE.search(block)
+        if sub_hdr:
+            block = block[:sub_hdr.start()]
+        for bm in BULLET_RE.finditer(block):
+            raw = bm.group(1)
+            stripped = raw.strip()
+            if not (2 <= len(stripped) <= 80):
+                continue
+            if stripped.count("(") > stripped.count(")"):
+                continue
+            lead = len(raw) - len(raw.lstrip())
+            s = block_start + bm.start(1) + lead
+            e = s + len(stripped)
+            if text[s:e] == stripped:
+                cands.append((s, e, stripped, "CHẨN_ĐOÁN"))
+    return cands
+
+
 def find_section_items(text):
     """Trich cac item dang bullet duoi cac heading da biet (Trieu chung hien
     tai, Thuoc truoc khi nhap vien, Chan doan phan biet...)."""
@@ -667,6 +818,7 @@ def find_section_items(text):
                 break
         if target_type is None:
             continue
+        trusted = title in TRUSTED_DIAGNOSIS_LIST_HEADERS
         block_start = hm.end()
         block_end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
         block_end = min(block_end, block_start + 500)
@@ -690,14 +842,24 @@ def find_section_items(text):
             block = block[:sub_hdr.start()]
 
         max_len = 80 if target_type == "CHẨN_ĐOÁN" else 150
+
+        def _trim_drug_paren(chunk):
+            if target_type == "THUỐC":
+                pidx = chunk.find(" (")
+                if pidx > 2:
+                    return chunk[:pidx]
+            return chunk
+
         bullets = list(BULLET_RE.finditer(block))
         if bullets:
             for bm in bullets:
                 raw = bm.group(1)
-                stripped = raw.strip()
+                stripped = _trim_drug_paren(raw.strip())
                 if len(stripped) < 2 or len(stripped) > max_len:
                     continue
-                if target_type == "CHẨN_ĐOÁN" and not _looks_like_diagnosis(stripped):
+                if stripped.count("(") > stripped.count(")"):
+                    continue
+                if target_type == "CHẨN_ĐOÁN" and not trusted and not _looks_like_diagnosis(stripped):
                     continue
                 lead = len(raw) - len(raw.lstrip())
                 s = block_start + bm.start(1) + lead
@@ -705,9 +867,9 @@ def find_section_items(text):
                 if text[s:e] == stripped:
                     cands.append((s, e, stripped, target_type))
         else:
-            line = block.strip()
+            line = _trim_drug_paren(block.strip())
             if 2 <= len(line) <= max_len and "\n" not in block.strip("\n"):
-                if target_type == "CHẨN_ĐOÁN" and not _looks_like_diagnosis(line):
+                if target_type == "CHẨN_ĐOÁN" and not trusted and not _looks_like_diagnosis(line):
                     pass
                 else:
                     s = block_start + block.find(line)
@@ -803,6 +965,8 @@ def get_assertions(text, start, end, history_spans):
 def get_candidates(entity_text, etype):
     low = entity_text.lower().strip()
     if etype == "CHẨN_ĐOÁN":
+        if low in _FLEX_CODES:
+            return _FLEX_CODES[low]
         for name, codes in DISEASE_ICD10.items():
             if name in low or low in name:
                 return codes
@@ -824,12 +988,22 @@ def get_candidates(entity_text, etype):
 
 def process_text(text):
     cands = []
-    cands += find_vitals(text)
-    cands += find_lab_panel(text)
+    # LUU Y QUAN TRONG (vong 8): cong thuc diem trong de bai chi neu Jaccard
+    # duoc tinh "voi cac benh, thuoc va trieu chung tuong ung" -- tuc la CHI
+    # CO 3 LOAI THUC THE trong schema thuc: CHẨN_ĐOÁN, THUỐC, TRIỆU_CHỨNG.
+    # Cac loai TÊN_XÉT_NGHIỆM / KẾT_QUẢ_XÉT_NGHIỆM (sinh hieu, xet nghiem)
+    # tu cac ham find_vitals/find_lab_panel KHONG nam trong schema nay, nen
+    # moi thuc the loai do la false positive thuan tuy (insertion loi trong
+    # WER, khong co gia tri Jaccard nao de khop), va con co the choan cho/
+    # chan mat mot thuc the CHẨN_ĐOÁN/THUỐC/TRIỆU_CHỨNG dung o cung vi tri
+    # do resolve_overlaps chi loai chong lan theo do dai span. Da loai bo
+    # hoan toan 2 ham nay khoi pipeline.
+    pass
     cands += find_diagnoses(text)
     cands += find_drugs(text)
     cands += find_symptoms(text)
     cands += find_section_items(text)
+    cands += find_trusted_diagnosis_lists(text)
 
     accepted = resolve_overlaps(cands)
     history_spans = get_history_spans(text)
@@ -870,6 +1044,19 @@ def main(input_dir, output_dir):
         idx = os.path.basename(fp).split(".")[0]
         with open(fp, encoding="utf-8") as f:
             text = f.read()
+        # QUAN TRONG: ~20% file trong corpus co doan van ban bi luu o dang
+        # Unicode NFD (chu cai roi + dau phu ket hop, vd "tê"+"combining
+        # acute" thay vi ky tu "tế" don) xen lan voi phan con lai la NFC.
+        # Dieu nay khien \b (word boundary) coi dau phu ket hop la ky tu
+        # "khong phai chu", tach doi mot tu lam mot thanh hai token gia
+        # (vd "học" bi doc thanh "ho" + dau nang roi), gay ra rat nhieu
+        # false positive/false negative khi so khop tu dien (vd "ho" khop
+        # nham vao giua tu "học", "tê" khop nham vao giua "tế bào"). Chuan
+        # hoa toan bo text ve NFC truoc khi xu ly de sua loi nay. Vi cong
+        # thuc diem KHONG cham truong "position" nen viec chuan hoa (co
+        # the lam thay doi so luong code point neu con sot NFD o dau khac)
+        # la an toan.
+        text = unicodedata.normalize("NFC", text)
         result = process_text(text)
         total_entities += len(result)
         if not result:
